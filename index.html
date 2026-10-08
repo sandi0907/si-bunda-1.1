@@ -1,0 +1,1575 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Si Bunda - Edukasi Gizi & Pengasuhan Balita</title>
+    
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Google Fonts: Nunito & Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <!-- Alpine.js -->
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+
+    <!-- Firebase Cloud Real-time Integration -->
+    <script type="module">
+       
+  // Import the functions you need from the SDKs you need
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/13.0.0/firebase-app.js";
+  import { getAnalytics } from "https://www.gstatic.com/firebasejs/13.0.0/firebase-analytics.js";
+  // TODO: Add SDKs for Firebase products that you want to use
+  // https://firebase.google.com/docs/web/setup#available-libraries
+
+  // Your web app's Firebase configuration
+  // For Firebase JS SDK v7.20.0 and later, measurementId is optional
+  const firebaseConfig = {
+    apiKey: "AIzaSyCKO6IcnY_cWGtMx6dB5abuLN_OtEOT5YM",
+    authDomain: "si-bunda.firebaseapp.com",
+    projectId: "si-bunda",
+    storageBucket: "si-bunda.firebasestorage.app",
+    messagingSenderId: "1062700322561",
+    appId: "1:1062700322561:web:624fcc956359d7e0ea9500",
+    measurementId: "G-MFY36D936G"
+  };
+
+  // Initialize Firebase
+  const app = initializeApp(firebaseConfig);
+  const analytics = getAnalytics(app);
+
+        let db = null;
+        let auth = null;
+        let authPromise = null;
+        let cachedWebhookUrl = localStorage.getItem('si_bunda_webhook') || '';
+
+        window.initFirebaseSync = async function(appScope) {
+            if (!firebaseConfig) {
+                console.warn("Firebase config missing, using local storage mode.");
+                return;
+            }
+
+            try {
+                const app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+
+                // Create persistent auth promise to prevent race conditions
+                authPromise = (async () => {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                })();
+
+                await authPromise;
+
+                // Helper: Direct send to Google Sheets Webhook
+                window.sendToGoogleSheet = function(logData, targetUrl) {
+                    const url = targetUrl || cachedWebhookUrl || (appScope ? appScope.googleSheetWebhook : '');
+                    if (!url) return;
+                    fetch(url, {
+                        method: 'POST',
+                        mode: 'no-cors',
+                        headers: { 'Content-Type': 'text/plain' },
+                        body: JSON.stringify(logData)
+                    }).catch(e => console.error("Google Sheet POST error:", e));
+                };
+
+                // Helper: Save Visitor Log to Cloud Firestore & Google Sheets
+                window.dbAddVisitorLog = async function(logData) {
+                    if (!db) return;
+                    try {
+                        if (authPromise) await authPromise;
+                        if (!auth.currentUser) return;
+                        
+                        const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'visitor_logs');
+                        await addDoc(colRef, logData);
+
+                        // Trigger Google Sheets forwarding from cloud handler
+                        window.sendToGoogleSheet(logData);
+                    } catch(e) {
+                        console.error("Firestore log write error:", e);
+                    }
+                };
+
+                // Real-time listener for Visitor Logs across devices
+                const logsCol = collection(db, 'artifacts', appId, 'public', 'data', 'visitor_logs');
+                onSnapshot(logsCol, (snapshot) => {
+                    const logs = [];
+                    snapshot.forEach(docSnap => {
+                        logs.push({ id: docSnap.id, ...docSnap.data() });
+                    });
+                    logs.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+                    appScope.syncFirestoreLogs(logs);
+                }, (err) => console.error("Firestore logs listener error:", err));
+
+                // Real-time listener for Webhook Settings
+                const settingsDoc = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config');
+                onSnapshot(settingsDoc, (snap) => {
+                    if (snap.exists() && snap.data().googleSheetWebhook) {
+                        cachedWebhookUrl = snap.data().googleSheetWebhook;
+                        appScope.syncWebhookUrl(cachedWebhookUrl);
+                    }
+                }, (err) => console.error("Firestore settings listener error:", err));
+
+                window.dbSaveWebhook = async function(url) {
+                    if (!db) return;
+                    try {
+                        if (authPromise) await authPromise;
+                        cachedWebhookUrl = url;
+                        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'settings', 'config');
+                        await setDoc(docRef, { googleSheetWebhook: url }, { merge: true });
+                    } catch(e) {
+                        console.error("Save webhook error:", e);
+                    }
+                };
+
+                // Real-time listener for Video Content
+                const videosCol = collection(db, 'artifacts', appId, 'public', 'data', 'videos');
+                onSnapshot(videosCol, (snapshot) => {
+                    if (!snapshot.empty) {
+                        const videoList = [];
+                        snapshot.forEach(docSnap => {
+                            videoList.push({ id: docSnap.id, ...docSnap.data() });
+                        });
+                        appScope.syncFirestoreVideos(videoList);
+                    }
+                }, (err) => console.error("Firestore videos listener error:", err));
+
+                window.dbSaveVideo = async function(video) {
+                    if (!db) return;
+                    try {
+                        if (authPromise) await authPromise;
+                        const vidId = video.id ? String(video.id) : Date.now().toString();
+                        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'videos', vidId);
+                        await setDoc(docRef, { ...video, id: vidId });
+                    } catch(e) {
+                        console.error("Save video error:", e);
+                    }
+                };
+
+                window.dbDeleteVideo = async function(vidId) {
+                    if (!db) return;
+                    try {
+                        if (authPromise) await authPromise;
+                        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'videos', String(vidId));
+                        await deleteDoc(docRef);
+                    } catch(e) {
+                        console.error("Delete video error:", e);
+                    }
+                };
+
+            } catch(e) {
+                console.error("Firebase Auth/Init error:", e);
+            }
+        };
+    </script>
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        bunda: {
+                            pink: '#FF7B9C',
+                            lightpink: '#FFF0F4',
+                            teal: '#2EC4B6',
+                            lightteal: '#E6F9F7',
+                            yellow: '#FF9F1C',
+                            softbg: '#FFFBF9',
+                            dark: '#2D3748',
+                            card: '#FFFFFF'
+                        }
+                    },
+                    fontFamily: {
+                        sans: ['Nunito', 'Inter', 'sans-serif']
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        body {
+            background-color: #FFFBF9;
+            font-family: 'Nunito', sans-serif;
+            color: #2D3748;
+        }
+        .scribd-shadow {
+            box-shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+        .no-scrollbar::-webkit-scrollbar {
+            display: none;
+        }
+        .no-scrollbar {
+            -ms-overflow-style: none;
+            scrollbar-width: none;
+        }
+    </style>
+</head>
+<body x-data="siBundaApp()" x-init="initApp()" class="min-h-screen flex flex-col justify-between antialiased selection:bg-bunda-pink selection:text-white">
+
+    <header class="sticky top-0 z-40 bg-white/90 backdrop-blur-md border-b border-pink-100 shadow-sm">
+        <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between items-center h-16 sm:h-20">
+                <!-- Logo Brand -->
+                <div @click="changePage('home')" class="flex items-center gap-2 cursor-pointer group">
+                    <div class="w-10 h-10 sm:w-12 sm:h-12 rounded-2xl flex items-center justify-center group-hover:scale-105 transition-transform">
+                        <img src="logo eduzi.png" alt="">
+                    </div>
+                    <div>
+                        <h1 class="text-xl sm:text-2xl font-black text-bunda-pink tracking-tight leading-none">Si Bunda</h1>
+                        <p class="text-xs text-gray-500 font-semibold tracking-wide">Edukasi Gizi & Balita</p>
+                    </div>
+                </div>
+
+                <!-- Desktop Navigation Links -->
+                <nav class="hidden md:flex items-center gap-1 lg:gap-2">
+                    <button @click="changePage('home')" :class="currentPage === 'home' ? 'bg-bunda-lightpink text-bunda-pink font-extrabold shadow-sm' : 'text-gray-600 hover:text-bunda-pink font-bold'" class="px-3.5 py-2 rounded-xl text-sm transition-all">
+                        <i class="fa-solid fa-house mr-1.5"></i> Home
+                    </button>
+                    <button @click="changePage('gizi')" :class="currentPage === 'gizi' ? 'bg-bunda-lightpink text-bunda-pink font-extrabold shadow-sm' : 'text-gray-600 hover:text-bunda-pink font-bold'" class="px-3.5 py-2 rounded-xl text-sm transition-all">
+                        <i class="fa-solid fa-bowl-food mr-1.5"></i> Gizi Sehat
+                    </button>
+                    <button @click="changePage('kms')" :class="currentPage === 'kms' ? 'bg-bunda-lightteal text-bunda-teal font-extrabold shadow-sm' : 'text-gray-600 hover:text-bunda-teal font-bold'" class="px-3.5 py-2 rounded-xl text-sm transition-all">
+                        <i class="fa-solid fa-chart-line mr-1.5"></i> Panduan KMS
+                    </button>
+                    <button @click="changePage('mpasi')" :class="currentPage === 'mpasi' ? 'bg-amber-100 text-amber-700 font-extrabold shadow-sm' : 'text-gray-600 hover:text-amber-600 font-bold'" class="px-3.5 py-2 rounded-xl text-sm transition-all">
+                        <i class="fa-solid fa-book-open-reader mr-1.5"></i> Resep MP ASI
+                    </button>
+                </nav>
+
+                <!-- User Profile & Admin Toggle Actions -->
+                <div class="flex items-center gap-2">
+                    <template x-if="userData.nama">
+                        <div class="hidden sm:flex items-center gap-2 bg-bunda-lightteal text-bunda-teal px-3 py-1.5 rounded-full text-xs font-bold border border-bunda-teal/20 shadow-sm">
+                            <i class="fa-solid fa-user-circle text-base text-bunda-teal"></i>
+                            <span class="max-w-[120px] truncate" x-text="'Ibu ' + userData.nama"></span>
+                            <button @click="welcomeTab = 'user'; showWelcomeModal = true" title="Ubah Data Diri" class="hover:text-bunda-pink ml-1">
+                                <i class="fa-solid fa-pen-to-square"></i>
+                            </button>
+                        </div>
+                    </template>
+
+                    <template x-if="isAdmin">
+                        <button @click="openAdminSection()" class="bg-purple-600 hover:bg-purple-700 text-white px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-1.5 transition-all shadow-sm">
+                            <i class="fa-solid fa-user-shield"></i>
+                            <span>Admin Dashboard</span>
+                        </button>
+                    </template>
+
+                    <button @click="mobileMenuOpen = !mobileMenuOpen" class="md:hidden p-2 text-gray-600 hover:text-bunda-pink focus:outline-none">
+                        <i class="fa-solid" :class="mobileMenuOpen ? 'fa-xmark text-2xl' : 'fa-bars text-2xl'"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Mobile Menu -->
+        <div x-show="mobileMenuOpen" x-transition class="md:hidden border-b border-pink-100 bg-white px-4 pt-2 pb-4 space-y-2">
+            <template x-if="userData.nama">
+                <div class="flex items-center justify-between p-3 bg-bunda-lightteal rounded-xl text-bunda-teal text-xs font-bold mb-3">
+                    <span class="truncate"><i class="fa-solid fa-user mr-2"></i> Ibu <span x-text="userData.nama"></span> (<span x-text="userData.kecamatan"></span>)</span>
+                    <button @click="showWelcomeModal = true; mobileMenuOpen = false;" class="underline text-bunda-pink">Ubah</button>
+                </div>
+            </template>
+            <button @click="changePage('home'); mobileMenuOpen = false;" :class="currentPage === 'home' ? 'bg-bunda-lightpink text-bunda-pink font-bold' : 'text-gray-700'" class="w-full text-left px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-3">
+                <i class="fa-solid fa-house w-5 text-center"></i> Home
+            </button>
+            <button @click="changePage('gizi'); mobileMenuOpen = false;" :class="currentPage === 'gizi' ? 'bg-bunda-lightpink text-bunda-pink font-bold' : 'text-gray-700'" class="w-full text-left px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-3">
+                <i class="fa-solid fa-bowl-food w-5 text-center"></i> Gizi Sehat untuk Si Kecil
+            </button>
+            <button @click="changePage('kms'); mobileMenuOpen = false;" :class="currentPage === 'kms' ? 'bg-bunda-lightpink text-bunda-pink font-bold' : 'text-gray-700'" class="w-full text-left px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-3">
+                <i class="fa-solid fa-chart-line w-5 text-center"></i> Panduan KMS
+            </button>
+            <button @click="changePage('mpasi'); mobileMenuOpen = false;" :class="currentPage === 'mpasi' ? 'bg-bunda-lightpink text-bunda-pink font-bold' : 'text-gray-700'" class="w-full text-left px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-3">
+                <i class="fa-solid fa-book-open-reader w-5 text-center"></i> Resep MP ASI
+            </button>
+        </div>
+    </header>
+
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 pt-6">
+        <div class="relative w-full bg-gradient-to-r from-pink-200 via-purple-100 to-teal-100 rounded-3xl overflow-hidden shadow-md border-4 border-white aspect-[16/9] max-h-[220px] sm:max-h-[320px] md:max-h-[380px] flex items-center justify-center group">
+           <img class="ix-embed-image" loading="lazy" fetchpriority="high" alt="" srcset="https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=100 100w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=116 116w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=134 134w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=156 156w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=182 182w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=210 210w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=244 244w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=282 282w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=328 328w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=380 380w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=442 442w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=512 512w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=594 594w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=688 688w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=798 798w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=926 926w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=1074 1074w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=1246 1246w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=1446 1446w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=1678 1678w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=1946 1946w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=2258 2258w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=2618 2618w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=3038 3038w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=3524 3524w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=4088 4088w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=4742 4742w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=5500 5500w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=6380 6380w, https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?auto=format,compress&w=7400 7400w" src="https://6ac6859d70fa33769150f041.imgix.net/Biru%20Hijau%20dan%20Merah%20Muda%20Belajar%20Bersama%20Anak-Anak%20Youtube%20Intro-2.gif?ixembed=1791395370108&auto=format,compress" />
+            <div class="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent flex items-end p-4 sm:p-8">
+                <div class="text-white">
+                    <span class="bg-bunda-pink text-white text-[10px] sm:text-xs font-black uppercase px-2.5 py-1 rounded-full shadow-sm mb-1 inline-block">
+                        Provinsi Kepulauan Bangka Belitung
+                    </span>
+                    <h2 class="text-lg sm:text-2xl md:text-3xl font-extrabold tracking-tight drop-shadow-md">
+                        Mendampingi Ibu, Menjaga Gizi Si Kecil 👶
+                    </h2>
+                    <p class="text-xs sm:text-sm text-pink-100 hidden sm:block">
+                        Informasi praktis, terpercaya, dan mudah dipahami untuk tumbuh kembang optimal.
+                    </p>
+                </div>
+            </div>
+            <template x-if="isAdmin">
+                <button @click="editHeaderGif()" class="absolute top-3 right-3 bg-white/90 text-gray-800 text-xs px-3 py-1.5 rounded-xl font-bold shadow-md hover:bg-bunda-pink hover:text-white transition">
+                    <i class="fa-solid fa-image mr-1"></i> Ganti GIF Header
+                </button>
+            </template>
+        </div>
+    </div>
+
+    <!-- MAIN CONTENT CONTAINER -->
+    <main class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 flex-grow w-full">
+
+        <!-- PAGE 1: HOME PAGE -->
+        <section x-show="currentPage === 'home'" x-transition:enter="transition ease-out duration-300" x-transition:enter-start="opacity-0 transform translate-y-2" x-transition:enter-end="opacity-100 transform translate-y-0" class="space-y-12">
+            
+            <div class="bg-white rounded-3xl p-6 sm:p-10 shadow-sm border border-pink-100/80 text-center relative overflow-hidden">
+                <div class="absolute -right-10 -bottom-10 w-40 h-40 bg-bunda-lightpink rounded-full blur-2xl opacity-60"></div>
+                <div class="absolute -left-10 -top-10 w-40 h-40 bg-bunda-lightteal rounded-full blur-2xl opacity-60"></div>
+                <div class="relative z-10 max-w-3xl mx-auto">
+                    <span class="text-bunda-teal font-extrabold text-xs sm:text-sm uppercase tracking-widest bg-bunda-lightteal px-4 py-1.5 rounded-full inline-block mb-3">
+                        Tujuan Utama Platform
+                    </span>
+                    <h2 class="text-2xl sm:text-4xl font-extrabold text-gray-800 mb-4 leading-tight">
+                        Platform Edukasi Gizi Berbasis Web untuk Pengasuhan Balita
+                    </h2>
+                    <p class="text-gray-600 text-sm sm:text-base leading-relaxed mb-6">
+                        Website <strong>Si Bunda</strong> hadir khusus membantu para Ibu di wilayah <strong>Kepulauan Bangka Belitung</strong> dalam pemenuhan gizi seimbang, pemantauan pertumbuhan melalui KMS, serta ragam inspirasi resep MP ASI sehat demi mencegah stunting dan mendukung tumbuh kembang optimal anak.
+                    </p>
+                    <div class="flex flex-wrap justify-center gap-4 text-xs sm:text-sm font-bold text-gray-700">
+                        <span class="flex items-center gap-1.5 bg-gray-50 px-3 py-2 rounded-xl border border-gray-100">
+                            <i class="fa-solid fa-circle-check text-bunda-teal"></i> Mudah Dipahami
+                        </span>
+                        <span class="flex items-center gap-1.5 bg-gray-50 px-3 py-2 rounded-xl border border-gray-100">
+                            <i class="fa-solid fa-circle-check text-bunda-teal"></i> Praktis & Ringkas
+                        </span>
+                        <span class="flex items-center gap-1.5 bg-gray-50 px-3 py-2 rounded-xl border border-gray-100">
+                            <i class="fa-solid fa-circle-check text-bunda-teal"></i> Sesuai Ahli Gizi
+                        </span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Features Cards Grid -->
+            <div class="space-y-8">
+                <div class="text-center max-w-xl mx-auto">
+                    <h3 class="text-xl sm:text-2xl font-black text-gray-800">Menu & Fitur Utama</h3>
+                    <p class="text-gray-500 text-xs sm:text-sm">Pilih topik edukasi gizi dan pengasuhan yang Ibu butuhkan hari ini</p>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 sm:gap-8">
+                    <!-- Feature Card 1 -->
+                    <div class="bg-white rounded-3xl p-6 shadow-sm border border-pink-100 hover:shadow-xl hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group">
+                        <div>
+                            <div class="w-full h-44 bg-bunda-lightpink rounded-2xl mb-5 flex items-center justify-center p-4 overflow-hidden relative">
+                                <img src="https://images.unsplash.com/photo-1584820927498-cfe5211fd8bf?auto=format&fit=crop&w=600&q=80" 
+                                     alt="Gizi Sehat Ilustrasi" 
+                                     class="w-full h-full object-cover rounded-xl group-hover:scale-105 transition-transform duration-500">
+                                <span class="absolute top-3 left-3 bg-bunda-pink text-white text-xs font-bold px-2.5 py-1 rounded-lg shadow-sm">
+                                    Video Edukasi
+                                </span>
+                            </div>
+                            <h4 class="text-lg font-black text-gray-800 mb-2 group-hover:text-bunda-pink transition-colors">
+                                Gizi Sehat untuk Si Kecil
+                            </h4>
+                            <p class="text-gray-600 text-xs sm:text-sm leading-relaxed mb-6">
+                                Penjelasan lengkap video mengenai pentingnya gizi seimbang, zat gizi makro & mikro, porsi makan balita, serta tips pola pengasuhan makan yang menyenangkan agar anak tidak picky eater.
+                            </p>
+                        </div>
+                        <button @click="changePage('gizi')" class="w-full bg-bunda-pink hover:bg-pink-600 text-white font-bold py-3 px-4 rounded-xl shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 text-sm">
+                            <span>Gizi Sehat untuk Si Kecil</span>
+                            <i class="fa-solid fa-arrow-right"></i>
+                        </button>
+                    </div>
+
+                    <!-- Feature Card 2 -->
+                    <div class="bg-white rounded-3xl p-6 shadow-sm border border-teal-100 hover:shadow-xl hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group">
+                        <div>
+                            <div class="w-full h-44 bg-bunda-lightteal rounded-2xl mb-5 flex items-center justify-center p-4 overflow-hidden relative">
+                                <img src="https://images.unsplash.com/photo-1502086223501-7ea6ecd79368?auto=format&fit=crop&w=600&q=80" 
+                                     alt="Panduan KMS Ilustrasi" 
+                                     class="w-full h-full object-cover rounded-xl group-hover:scale-105 transition-transform duration-500">
+                                <span class="absolute top-3 left-3 bg-bunda-teal text-white text-xs font-bold px-2.5 py-1 rounded-lg shadow-sm">
+                                    Panduan Tumbuh Kembang
+                                </span>
+                            </div>
+                            <h4 class="text-lg font-black text-gray-800 mb-2 group-hover:text-bunda-teal transition-colors">
+                                Panduan KMS (Kartu Menuju Sehat)
+                            </h4>
+                            <p class="text-gray-600 text-xs sm:text-sm leading-relaxed mb-6">
+                                Panduan visual dan video mudah membaca grafik pertumbuhan anak di KMS Posyandu, mengenali pita warna berat badan, serta deteksi dini gangguan tumbuh kembang balita.
+                            </p>
+                        </div>
+                        <button @click="changePage('kms')" class="w-full bg-bunda-teal hover:bg-teal-600 text-white font-bold py-3 px-4 rounded-xl shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 text-sm">
+                            <span>Panduan KMS</span>
+                            <i class="fa-solid fa-arrow-right"></i>
+                        </button>
+                    </div>
+
+                    <!-- Feature Card 3 -->
+                    <div class="bg-white rounded-3xl p-6 shadow-sm border border-amber-100 hover:shadow-xl hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between group">
+                        <div>
+                            <div class="w-full h-44 bg-amber-50 rounded-2xl mb-5 flex items-center justify-center p-4 overflow-hidden relative">
+                                <img src="https://images.unsplash.com/photo-1576092768241-dec231879fc3?auto=format&fit=crop&w=600&q=80" 
+                                     alt="Resep MP ASI Ilustrasi" 
+                                     class="w-full h-full object-cover rounded-xl group-hover:scale-105 transition-transform duration-500">
+                                <span class="absolute top-3 left-3 bg-bunda-yellow text-white text-xs font-bold px-2.5 py-1 rounded-lg shadow-sm">
+                                    Dokumen PDF Resep
+                                </span>
+                            </div>
+                            <h4 class="text-lg font-black text-gray-800 mb-2 group-hover:text-bunda-yellow transition-colors">
+                                Resep MP ASI Sehat
+                            </h4>
+                            <p class="text-gray-600 text-xs sm:text-sm leading-relaxed mb-6">
+                                Kumpulan resep Makanan Pendamping ASI bergizi tinggi berbasis bahan lokal yang mudah diolah, tersusun rapi dalam tampilan e-book PDF interaktif gaya Scribd.
+                            </p>
+                        </div>
+                        <button @click="changePage('mpasi')" class="w-full bg-bunda-yellow hover:bg-amber-600 text-white font-bold py-3 px-4 rounded-xl shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 text-sm">
+                            <span>Resep MP ASI</span>
+                            <i class="fa-solid fa-arrow-right"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- WhatsApp Contact Section -->
+            <div class="bg-gradient-to-r from-emerald-500 to-teal-600 rounded-3xl p-6 sm:p-10 text-white shadow-lg flex flex-col sm:flex-row items-center justify-between gap-6">
+                <div class="space-y-2 text-center sm:text-left">
+                    <span class="bg-white/20 text-white text-xs font-extrabold px-3 py-1 rounded-full uppercase tracking-wider">
+                        Konsultasi Ahli Gizi
+                    </span>
+                    <h3 class="text-xl sm:text-3xl font-black">Butuh Konsultasi Gizi Langsung?</h3>
+                    <p class="text-emerald-100 text-xs sm:text-sm max-w-xl">
+                        Ibu memiliki pertanyaan khusus mengenai tumbuh kembang atau pola makan si kecil? Klik tombol WhatsApp berikut untuk terhubung langsung dengan Ahli Gizi kami.
+                    </p>
+                </div>
+                <a :href="'https://wa.me/' + whatsappNumber + '?text=' + encodeURIComponent('Halo Ahli Gizi Si Bunda, saya Ibu ' + (userData.nama || '') + ' dari Kecamatan ' + (userData.kecamatan || '') + ' ingin berkonsultasi mengenai gizi balita saya.')" 
+                   target="_blank" 
+                   class="bg-white text-emerald-600 hover:bg-emerald-50 px-6 py-3.5 rounded-2xl font-black text-sm shadow-md hover:shadow-xl transition-all flex items-center gap-2 whitespace-nowrap group">
+                    <i class="fa-brands fa-whatsapp text-2xl text-emerald-500 group-hover:scale-110 transition-transform"></i>
+                    <span>Hubungi via WhatsApp</span>
+                </a>
+            </div>
+
+        </section>
+
+        <!-- PAGE 2: GIZI SEHAT PAGE -->
+        <section x-show="currentPage === 'gizi'" x-transition:enter="transition ease-out duration-300" x-transition:enter-start="opacity-0 transform translate-y-2" x-transition:enter-end="opacity-100 transform translate-y-0" class="space-y-8">
+            <div class="bg-white rounded-3xl p-6 sm:p-8 shadow-sm border border-pink-100">
+                <div class="flex items-center gap-2 text-xs font-bold text-bunda-pink mb-2">
+                    <button @click="changePage('home')" class="hover:underline">Home</button>
+                    <span>/</span>
+                    <span>Gizi Sehat</span>
+                </div>
+                <h2 class="text-2xl sm:text-3xl font-black text-bunda-pink mb-3 flex items-center gap-2">
+                    <i class="fa-solid fa-bowl-food"></i> Gizi Sehat untuk Si Kecil
+                </h2>
+                <div class="bg-bunda-lightpink p-4 sm:p-6 rounded-2xl border-l-4 border-bunda-pink text-gray-700 space-y-2">
+                    <h3 class="font-extrabold text-base sm:text-lg text-pink-700">
+                        Yuk Kenali Gizi Sehat untuk Tumbuh Kembang Si Kecil!
+                    </h3>
+                    <p class="text-xs sm:text-sm leading-relaxed">
+                        Pahami pentingnya pemberian makanan yang tepat dan pola pengasuhan saat makan untuk mendukung terpenuhinya kebutuhan gizi anak. Yuk, simak penjelasan video berikut untuk mendapatkan informasi bermanfaat dalam mendukung tumbuh kembang si kecil.
+                    </p>
+                </div>
+            </div>
+
+            <!-- TikTok 2-Column Grid Layout -->
+            <div>
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-lg font-black text-gray-800 flex items-center gap-2">
+                        <i class="fa-solid fa-circle-play text-bunda-pink"></i> Galeri Video Edukasi Gizi
+                    </h3>
+                    <span class="text-xs text-gray-500 font-semibold" x-text="giziVideos.length + ' Video Tersedia'"></span>
+                </div>
+
+                <div class="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-2 gap-3 sm:gap-6">
+                    <template x-for="(video, index) in giziVideos" :key="video.id">
+                        <div class="bg-white rounded-2xl overflow-hidden shadow-sm hover:shadow-md border border-gray-100 flex flex-col justify-between group transition">
+                            <div class="relative w-full bg-black aspect-video sm:aspect-[16/10] overflow-hidden">
+                                <template x-if="activeVideoId === video.id">
+                                    <iframe :src="'https://www.youtube.com/embed/' + video.youtubeId + '?autoplay=1'" 
+                                            class="w-full h-full border-0" 
+                                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
+                                            allowfullscreen></iframe>
+                                </template>
+                                <template x-if="activeVideoId !== video.id">
+                                    <div @click="activeVideoId = video.id" class="w-full h-full cursor-pointer relative group/thumb">
+                                        <img :src="video.thumbnail || 'https://img.youtube.com/vi/' + video.youtubeId + '/hqdefault.jpg'" 
+                                             :alt="video.title" 
+                                             class="w-full h-full object-cover group-hover/thumb:scale-105 transition-transform duration-300">
+                                        <div class="absolute inset-0 bg-black/30 group-hover/thumb:bg-black/20 transition-colors flex items-center justify-center">
+                                            <div class="w-12 h-12 sm:w-16 sm:h-16 bg-bunda-pink/90 text-white rounded-full flex items-center justify-center shadow-lg group-hover/thumb:scale-110 transition-transform">
+                                                <i class="fa-solid fa-play text-lg sm:text-2xl ml-1"></i>
+                                            </div>
+                                        </div>
+                                        <span class="absolute bottom-2 right-2 bg-black/70 text-white text-[10px] font-bold px-2 py-0.5 rounded-md" x-text="video.duration || '03:45'"></span>
+                                    </div>
+                                </template>
+                            </div>
+
+                            <div class="p-3 sm:p-5 flex-grow flex flex-col justify-between">
+                                <div>
+                                    <h4 class="font-bold text-xs sm:text-base text-gray-800 line-clamp-2 mb-1 group-hover:text-bunda-pink transition" x-text="video.title"></h4>
+                                    <p class="text-[11px] sm:text-xs text-gray-500 line-clamp-2 leading-snug mb-3" x-text="video.description"></p>
+                                </div>
+                                <div class="flex items-center justify-between text-[10px] sm:text-xs text-gray-400 font-semibold pt-2 border-t border-gray-50">
+                                    <span><i class="fa-solid fa-eye mr-1"></i> <span x-text="video.views || '1.2k'"></span> tontonan</span>
+                                    <template x-if="isAdmin">
+                                        <div class="flex gap-2">
+                                            <button @click="editVideo(video, 'gizi')" class="text-blue-500 hover:underline font-bold">Edit</button>
+                                            <button @click="confirmDeleteVideo(video.id, 'gizi')" class="text-red-500 hover:underline font-bold">Hapus</button>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </section>
+
+        <!-- PAGE 3: PANDUAN KMS PAGE -->
+        <section x-show="currentPage === 'kms'" x-transition:enter="transition ease-out duration-300" x-transition:enter-start="opacity-0 transform translate-y-2" x-transition:enter-end="opacity-100 transform translate-y-0" class="space-y-8">
+            <div class="bg-white rounded-3xl p-6 sm:p-8 shadow-sm border border-teal-100">
+                <div class="flex items-center gap-2 text-xs font-bold text-bunda-teal mb-2">
+                    <button @click="changePage('home')" class="hover:underline">Home</button>
+                    <span>/</span>
+                    <span>Panduan KMS</span>
+                </div>
+                <h2 class="text-2xl sm:text-3xl font-black text-bunda-teal mb-3 flex items-center gap-2">
+                    <i class="fa-solid fa-chart-line"></i> Panduan Kartu Menuju Sehat (KMS)
+                </h2>
+                <div class="bg-bunda-lightteal p-4 sm:p-6 rounded-2xl border-l-4 border-bunda-teal text-gray-700 space-y-2">
+                    <h3 class="font-extrabold text-base sm:text-lg text-teal-800">
+                        Pantau Grafik Tumbuh Kembang Anak dengan Benar!
+                    </h3>
+                    <p class="text-xs sm:text-sm leading-relaxed">
+                        Kartu Menuju Sehat (KMS) adalah alat penting untuk memantau pertumbuhan balita setiap bulan. Pelajari cara membaca grafik berat badan anak, memahami sinyal penimbangan (N1/N2/T), serta tindakan tepat yang perlu dilakukan Ibu melalui video panduan berikut.
+                    </p>
+                </div>
+            </div>
+
+            <div>
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-lg font-black text-gray-800 flex items-center gap-2">
+                        <i class="fa-solid fa-circle-play text-bunda-teal"></i> Video Tutorial & Pemantauan KMS
+                    </h3>
+                    <span class="text-xs text-gray-500 font-semibold" x-text="kmsVideos.length + ' Video Tersedia'"></span>
+                </div>
+
+                <div class="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-2 gap-3 sm:gap-6">
+                    <template x-for="(video, index) in kmsVideos" :key="video.id">
+                        <div class="bg-white rounded-2xl overflow-hidden shadow-sm hover:shadow-md border border-gray-100 flex flex-col justify-between group transition">
+                            <div class="relative w-full bg-black aspect-video sm:aspect-[16/10] overflow-hidden">
+                                <template x-if="activeVideoId === video.id">
+                                    <iframe :src="'https://www.youtube.com/embed/' + video.youtubeId + '?autoplay=1'" 
+                                            class="w-full h-full border-0" 
+                                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
+                                            allowfullscreen></iframe>
+                                </template>
+                                <template x-if="activeVideoId !== video.id">
+                                    <div @click="activeVideoId = video.id" class="w-full h-full cursor-pointer relative group/thumb">
+                                        <img :src="video.thumbnail || 'https://img.youtube.com/vi/' + video.youtubeId + '/hqdefault.jpg'" 
+                                             :alt="video.title" 
+                                             class="w-full h-full object-cover group-hover/thumb:scale-105 transition-transform duration-300">
+                                        <div class="absolute inset-0 bg-black/30 group-hover/thumb:bg-black/20 transition-colors flex items-center justify-center">
+                                            <div class="w-12 h-12 sm:w-16 sm:h-16 bg-bunda-teal/90 text-white rounded-full flex items-center justify-center shadow-lg group-hover/thumb:scale-110 transition-transform">
+                                                <i class="fa-solid fa-play text-lg sm:text-2xl ml-1"></i>
+                                            </div>
+                                        </div>
+                                        <span class="absolute bottom-2 right-2 bg-black/70 text-white text-[10px] font-bold px-2 py-0.5 rounded-md" x-text="video.duration || '04:10'"></span>
+                                    </div>
+                                </template>
+                            </div>
+
+                            <div class="p-3 sm:p-5 flex-grow flex flex-col justify-between">
+                                <div>
+                                    <h4 class="font-bold text-xs sm:text-base text-gray-800 line-clamp-2 mb-1 group-hover:text-bunda-teal transition" x-text="video.title"></h4>
+                                    <p class="text-[11px] sm:text-xs text-gray-500 line-clamp-2 leading-snug mb-3" x-text="video.description"></p>
+                                </div>
+                                <div class="flex items-center justify-between text-[10px] sm:text-xs text-gray-400 font-semibold pt-2 border-t border-gray-50">
+                                    <span><i class="fa-solid fa-eye mr-1"></i> <span x-text="video.views || '850'"></span> tontonan</span>
+                                    <template x-if="isAdmin">
+                                        <div class="flex gap-2">
+                                            <button @click="editVideo(video, 'kms')" class="text-blue-500 hover:underline font-bold">Edit</button>
+                                            <button @click="confirmDeleteVideo(video.id, 'kms')" class="text-red-500 hover:underline font-bold">Hapus</button>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </section>
+
+        <!-- PAGE 4: RESEP MP ASI PAGE -->
+        <section x-show="currentPage === 'mpasi'" x-transition:enter="transition ease-out duration-300" x-transition:enter-start="opacity-0 transform translate-y-2" x-transition:enter-end="opacity-100 transform translate-y-0" class="space-y-8">
+            <div class="bg-white rounded-3xl p-6 sm:p-8 shadow-sm border border-amber-100">
+                <div class="flex items-center gap-2 text-xs font-bold text-amber-600 mb-2">
+                    <button @click="changePage('home')" class="hover:underline">Home</button>
+                    <span>/</span>
+                    <span>Resep MP ASI</span>
+                </div>
+                <h2 class="text-2xl sm:text-3xl font-black text-bunda-yellow mb-3 flex items-center gap-2">
+                    <i class="fa-solid fa-book-open-reader"></i> Resep MP ASI Bergizi
+                </h2>
+                <div class="bg-amber-50 p-4 sm:p-6 rounded-2xl border-l-4 border-bunda-yellow text-gray-700 space-y-2">
+                    <h3 class="font-extrabold text-base sm:text-lg text-amber-800">
+                        Kumpulan Resep Pilihan MP ASI Sehat & Lezat
+                    </h3>
+                    <p class="text-xs sm:text-sm leading-relaxed">
+                        Temukan berbagai variasi resep Makanan Pendamping ASI yang disesuaikan dengan tahapan usia balita (6–24 bulan). Buku resep disajikan dalam format buku dokumen interaktif di bawah ini yang dapat dibaca per halaman secara berurutan.
+                    </p>
+                </div>
+            </div>
+
+            <!-- PDF Tabs -->
+            <div class="flex items-center gap-2 overflow-x-auto pb-2 no-scrollbar">
+                <template x-for="book in pdfBooks" :key="book.id">
+                    <button @click="selectedPdf = book; pdfZoom = 100;" 
+                            :class="selectedPdf.id === book.id ? 'bg-bunda-yellow text-white font-extrabold shadow-md' : 'bg-white text-gray-700 border border-gray-200 hover:bg-amber-50'" 
+                            class="px-4 py-2.5 rounded-2xl text-xs sm:text-sm whitespace-nowrap transition-all flex items-center gap-2">
+                        <i class="fa-solid fa-file-pdf"></i>
+                        <span x-text="book.title"></span>
+                    </button>
+                </template>
+            </div>
+
+            <!-- SCRIBD DOCUMENT VIEWER -->
+            <div class="bg-gray-800 rounded-3xl shadow-xl overflow-hidden border border-gray-700">
+                <div class="bg-gray-900 text-white px-4 py-3 border-b border-gray-800 flex flex-wrap items-center justify-between gap-3">
+                    <div class="flex items-center gap-2">
+                        <i class="fa-solid fa-book-open text-bunda-yellow"></i>
+                        <span class="font-bold text-xs sm:text-sm truncate max-w-[200px] sm:max-w-md" x-text="selectedPdf.title"></span>
+                    </div>
+
+                    <div class="flex items-center gap-3 text-xs">
+                        <div class="flex items-center bg-gray-800 rounded-xl px-2 py-1 border border-gray-700">
+                            <button @click="if(pdfZoom > 70) pdfZoom -= 10" class="hover:text-bunda-yellow px-1" title="Zoom Out">
+                                <i class="fa-solid fa-minus"></i>
+                            </button>
+                            <span class="px-2 font-mono text-gray-300" x-text="pdfZoom + '%'"></span>
+                            <button @click="if(pdfZoom < 150) pdfZoom += 10" class="hover:text-bunda-yellow px-1" title="Zoom In">
+                                <i class="fa-solid fa-plus"></i>
+                            </button>
+                        </div>
+
+                        <div class="bg-gray-800 px-3 py-1 rounded-xl text-gray-300 font-mono border border-gray-700">
+                            <span x-text="'Halaman 1 - ' + selectedPdf.pages.length"></span>
+                        </div>
+
+                        <a :href="selectedPdf.downloadUrl || '#'" download target="_blank" class="bg-bunda-yellow hover:bg-amber-600 text-white px-3 py-1.5 rounded-xl font-bold flex items-center gap-1 transition">
+                            <i class="fa-solid fa-download"></i>
+                            <span class="hidden sm:inline">Unduh PDF</span>
+                        </a>
+                    </div>
+                </div>
+
+                <div class="p-4 sm:p-8 max-h-[650px] overflow-y-auto bg-gray-700/60 flex flex-col items-center space-y-6">
+                    <template x-for="(page, pageIdx) in selectedPdf.pages" :key="pageIdx">
+                        <div class="bg-white rounded-xl scribd-shadow transition-all duration-300 relative overflow-hidden"
+                             :style="'width: ' + (600 * (pdfZoom/100)) + 'px; min-height: ' + (780 * (pdfZoom/100)) + 'px; max-width: 100%;'">
+                            
+                            <div class="border-b border-gray-100 p-4 sm:p-6 bg-amber-50/40 flex justify-between items-center text-xs text-gray-400">
+                                <span class="font-bold text-bunda-yellow">Si Bunda MP-ASI Cookbook</span>
+                                <span class="font-mono" x-text="'Hal. ' + (pageIdx + 1)"></span>
+                            </div>
+
+                            <div class="p-6 sm:p-8 space-y-4">
+                                <div class="flex items-center justify-between border-b border-pink-100 pb-3">
+                                    <h3 class="text-base sm:text-xl font-black text-gray-800" x-text="page.recipeTitle"></h3>
+                                    <span class="bg-bunda-lightpink text-bunda-pink font-bold text-[10px] sm:text-xs px-2.5 py-1 rounded-full" x-text="page.ageCategory"></span>
+                                </div>
+
+                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 my-4">
+                                    <img :src="page.image" :alt="page.recipeTitle" class="w-full h-40 sm:h-48 object-cover rounded-xl border border-gray-100">
+                                    <div class="bg-gray-50 p-4 rounded-xl text-xs space-y-2">
+                                        <h4 class="font-extrabold text-gray-700 border-b pb-1">Bahan-Bahan Utama:</h4>
+                                        <ul class="list-disc list-inside text-gray-600 space-y-1">
+                                            <template x-for="ing in page.ingredients" :key="ing">
+                                                <li x-text="ing"></li>
+                                            </template>
+                                        </ul>
+                                    </div>
+                                </div>
+
+                                <div class="space-y-2 text-xs text-gray-700">
+                                    <h4 class="font-extrabold text-gray-800">Langkah Pembuatan:</h4>
+                                    <ol class="list-decimal list-inside space-y-1.5 text-gray-600 leading-relaxed">
+                                        <template x-for="step in page.steps" :key="step">
+                                            <li x-text="step"></li>
+                                        </template>
+                                    </ol>
+                                </div>
+
+                                <div class="mt-4 p-3 bg-teal-50 rounded-xl text-[11px] text-teal-800 border border-teal-100 flex items-start gap-2">
+                                    <i class="fa-solid fa-lightbulb text-bunda-teal text-sm mt-0.5"></i>
+                                    <div>
+                                        <span class="font-bold">Catatan Gizi Ahli:</span>
+                                        <span x-text="page.nutritionNote"></span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="absolute bottom-0 inset-x-0 p-3 bg-gray-50 border-t border-gray-100 text-center text-[10px] text-gray-400 font-semibold">
+                                Platform Edukasi Gizi Si Bunda - Kepulauan Bangka Belitung
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </section>
+
+        <!-- PAGE 5: ADMIN DASHBOARD PAGE -->
+        <section x-show="isAdmin && currentPage === 'admin'" x-transition:enter="transition ease-out duration-300" x-transition:enter-start="opacity-0 transform translate-y-2" x-transition:enter-end="opacity-100 transform translate-y-0" class="space-y-8">
+            
+            <div class="bg-purple-900 text-white rounded-3xl p-6 sm:p-8 shadow-xl flex flex-wrap justify-between items-center gap-4">
+                <div>
+                    <span class="bg-purple-700 text-purple-200 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider">
+                        Hak Akses Penuh Admin Ahli Gizi
+                    </span>
+                    <h2 class="text-2xl sm:text-3xl font-black mt-1">Dashboard Kelola Konten & Data Kunjungan</h2>
+                    <p class="text-purple-200 text-xs sm:text-sm">Pantau sasaran Ibu Balita (Realtime Cloud Sync), sinkronkan ke Google Sheets, dan kelola konten edukasi</p>
+                </div>
+                <button @click="logoutAdmin()" class="bg-red-500 hover:bg-red-600 text-white font-bold px-4 py-2 rounded-xl text-xs sm:text-sm transition shadow-md">
+                    <i class="fa-solid fa-right-from-bracket mr-1"></i> Keluar Admin
+                </button>
+            </div>
+
+            <!-- Admin Navigation Tabs -->
+            <div class="flex border-b border-gray-200 gap-4">
+                <button @click="adminTab = 'analytics'" :class="adminTab === 'analytics' ? 'border-b-4 border-purple-600 text-purple-700 font-extrabold' : 'text-gray-500 font-bold'" class="pb-3 text-sm transition flex items-center gap-2">
+                    <i class="fa-solid fa-table-cells text-emerald-600"></i>
+                    <span>Data Kunjungan Ibu (<span x-text="visitorLogs.length"></span>)</span>
+                    <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" title="Cloud Realtime Sync Active"></span>
+                </button>
+                <button @click="adminTab = 'videos'" :class="adminTab === 'videos' ? 'border-b-4 border-purple-600 text-purple-700 font-extrabold' : 'text-gray-500 font-bold'" class="pb-3 text-sm transition">
+                    <i class="fa-solid fa-video mr-1"></i> Kelola Video Edukasi
+                </button>
+            </div>
+
+            <!-- TAB 1: DATA KUNJUNGAN IBU & GOOGLE SPREADSHEET INTEGRATION -->
+            <div x-show="adminTab === 'analytics'" class="space-y-6">
+                
+                <!-- Google Sheets Sync Configuration Banner -->
+                <div class="bg-white rounded-3xl p-6 border-2 border-emerald-200 shadow-sm space-y-4">
+                    <div class="flex flex-wrap justify-between items-start gap-2">
+                        <div class="space-y-1">
+                            <h4 class="font-extrabold text-gray-800 text-base flex items-center gap-2">
+                                <i class="fa-solid fa-file-excel text-emerald-600 text-xl"></i> Integrasi Otomatis ke Google Spreadsheet
+                            </h4>
+                            <p class="text-xs text-gray-600">
+                                Setiap data nama & kecamatan yang diisi oleh pengunjung dari device mana pun akan otomatis terikirim & tersusun rapi sebagai baris baru di file Google Spreadsheet Anda.
+                            </p>
+                        </div>
+                        <button @click="showScriptModal = true" class="bg-emerald-50 text-emerald-700 border border-emerald-300 hover:bg-emerald-100 font-bold px-3 py-1.5 rounded-xl text-xs transition flex items-center gap-1.5">
+                            <i class="fa-solid fa-code"></i>
+                            <span>Lihat Kode Google Apps Script</span>
+                        </button>
+                    </div>
+
+                    <div class="flex flex-col sm:flex-row gap-2">
+                        <input type="url" x-model="googleSheetWebhook" placeholder="Tempel URL Webhook Google Apps Script di sini (https://script.google.com/macros/s/.../exec)" class="flex-grow text-xs p-3 rounded-xl border border-gray-300 focus:ring-2 focus:ring-emerald-500 outline-none">
+                        <button @click="saveWebhookUrl()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-5 py-3 rounded-xl text-xs whitespace-nowrap shadow transition">
+                            <i class="fa-solid fa-floppy-disk mr-1"></i> Simpan Webhook
+                        </button>
+                    </div>
+
+                    <template x-if="googleSheetWebhook">
+                        <div class="p-3 bg-emerald-50 rounded-xl text-xs text-emerald-800 flex items-center justify-between border border-emerald-200">
+                            <span class="flex items-center gap-1.5 font-bold">
+                                <i class="fa-solid fa-circle-check text-emerald-600"></i> Webhook Google Sheets Terhubung & Aktif!
+                            </span>
+                            <button @click="testWebhook()" class="underline font-bold hover:text-emerald-900 text-[11px]">Uji Kirim Data Sampel</button>
+                        </div>
+                    </template>
+                </div>
+
+                <!-- Visitor Log Data Table with Search and CSV Download -->
+                <div class="bg-white rounded-3xl border border-gray-200 overflow-hidden shadow-sm">
+                    <div class="p-4 sm:p-6 bg-gray-50 border-b flex flex-wrap justify-between items-center gap-3">
+                        <div>
+                            <div class="flex items-center gap-2">
+                                <h4 class="font-extrabold text-gray-800 text-base">Tabel Data Kunjungan Ibu Balita</h4>
+                                <span class="bg-emerald-100 text-emerald-800 text-[10px] font-extrabold px-2 py-0.5 rounded-full flex items-center gap-1">
+                                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-600 animate-ping"></span> Realtime Sync
+                                </span>
+                            </div>
+                            <p class="text-xs text-gray-500">Hasil rekap formulir selamat datang pengunjung Si Bunda secara live dari semua perangkat</p>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <input type="text" x-model="searchLog" placeholder="Cari nama / kecamatan..." class="text-xs p-2.5 rounded-xl border border-gray-300 focus:ring-2 focus:ring-purple-500 outline-none w-48 sm:w-64">
+                            <button @click="exportToCSV()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-2 rounded-xl text-xs shadow flex items-center gap-1.5 transition">
+                                <i class="fa-solid fa-file-csv text-base"></i> Unduh Excel / CSV
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="max-h-96 overflow-y-auto">
+                        <table class="w-full text-left text-xs sm:text-sm">
+                            <thead class="bg-gray-100 text-gray-700 font-extrabold sticky top-0 z-10">
+                                <tr>
+                                    <th class="p-3.5">Waktu Kunjungan</th>
+                                    <th class="p-3.5">Nama Ibu</th>
+                                    <th class="p-3.5">Kecamatan (Kep. Bangka Belitung)</th>
+                                    <th class="p-3.5 text-center">Status Cloud Sync</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-100">
+                                <template x-for="(log, idx) in filteredLogs" :key="idx">
+                                    <tr class="hover:bg-purple-50/50 transition">
+                                        <td class="p-3.5 text-gray-500 text-xs font-mono" x-text="log.timestamp"></td>
+                                        <td class="p-3.5 font-bold text-gray-800" x-text="log.nama"></td>
+                                        <td class="p-3.5 text-bunda-teal font-extrabold" x-text="log.kecamatan"></td>
+                                        <td class="p-3.5 text-center">
+                                            <span class="bg-emerald-100 text-emerald-800 text-[10px] font-extrabold px-2.5 py-1 rounded-full inline-flex items-center gap-1">
+                                                <i class="fa-solid fa-cloud-check text-emerald-600"></i> Tersimpan Cloud
+                                            </span>
+                                        </td>
+                                    </tr>
+                                </template>
+                                <template x-if="filteredLogs.length === 0">
+                                    <tr>
+                                        <td colspan="4" class="p-8 text-center text-gray-400">Belum ada data kunjungan yang cocok.</td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- TAB 2: KELOLA VIDEO (CRUD) -->
+            <div x-show="adminTab === 'videos'" class="space-y-6">
+                <div class="flex justify-between items-center">
+                    <h3 class="font-extrabold text-gray-800 text-lg">Daftar Konten Video Edukasi</h3>
+                    <button @click="openVideoModal()" class="bg-purple-600 hover:bg-purple-700 text-white font-bold px-4 py-2.5 rounded-xl text-xs sm:text-sm shadow">
+                        <i class="fa-solid fa-plus mr-1"></i> Tambah Video Baru
+                    </button>
+                </div>
+
+                <div class="bg-white rounded-2xl border border-gray-200 overflow-hidden shadow-sm">
+                    <table class="w-full text-left text-xs sm:text-sm">
+                        <thead class="bg-gray-50 text-gray-600 font-bold border-b border-gray-200">
+                            <tr>
+                                <th class="p-3">Kategori</th>
+                                <th class="p-3">Judul Video</th>
+                                <th class="p-3">YouTube ID</th>
+                                <th class="p-3 text-right">Aksi</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-100">
+                            <template x-for="v in [...giziVideos, ...kmsVideos]" :key="v.id">
+                                <tr class="hover:bg-gray-50">
+                                    <td class="p-3 font-bold uppercase text-[10px]" :class="v.category === 'gizi' ? 'text-bunda-pink' : 'text-bunda-teal'" x-text="v.category"></td>
+                                    <td class="p-3 font-semibold text-gray-800" x-text="v.title"></td>
+                                    <td class="p-3 font-mono text-gray-500" x-text="v.youtubeId"></td>
+                                    <td class="p-3 text-right space-x-2">
+                                        <button @click="editVideo(v, v.category)" class="text-blue-600 font-bold hover:underline">Edit</button>
+                                        <button @click="confirmDeleteVideo(v.id, v.category)" class="text-red-600 font-bold hover:underline">Hapus</button>
+                                    </td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        </section>
+
+    </main>
+
+    <!-- FOOTER -->
+    <footer class="bg-white border-t border-pink-100 mt-16 py-8">
+        <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row justify-between items-center gap-4 text-center sm:text-left">
+            <div>
+                <div class="flex items-center justify-center sm:justify-start gap-2 mb-1">
+                    <div class="w-7 h-7 bg-bunda-pink text-white rounded-lg flex items-center justify-center text-xs font-bold">
+                        <i class="fa-solid fa-heart-pulse"></i>
+                    </div>
+                    <span class="font-extrabold text-bunda-pink text-lg">Si Bunda</span>
+                </div>
+                <p class="text-xs text-gray-500">Platform Edukasi Gizi & Pengasuhan Balita Kepulauan Bangka Belitung</p>
+            </div>
+            <div class="text-xs text-gray-400">
+                &copy; 2026 Si Bunda. Dikembangkan untuk Ahli Gizi & Ibu Cerdas Indonesia.
+            </div>
+        </div>
+    </footer>
+
+
+    <!-- 1. POP-UP SELAMAT DATANG -->
+    <div x-show="showWelcomeModal" x-transition class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+        <div @click.away="if(userData.nama || isAdmin) showWelcomeModal = false" class="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 shadow-2xl border-4 border-pink-100 relative overflow-hidden">
+            
+            <!-- Tab Switcher: Pengunjung vs Admin -->
+            <div class="flex bg-gray-100 p-1 rounded-2xl mb-6">
+                <button @click="welcomeTab = 'user'" :class="welcomeTab === 'user' ? 'bg-white text-bunda-pink font-extrabold shadow-sm' : 'text-gray-500 font-bold'" class="w-1/2 py-2 rounded-xl text-xs transition">
+                    <i class="fa-solid fa-user-heart mr-1"></i> Pengunjung / Ibu
+                </button>
+                <button @click="welcomeTab = 'admin'" :class="welcomeTab === 'admin' ? 'bg-purple-600 text-white font-extrabold shadow-sm' : 'text-gray-500 font-bold'" class="w-1/2 py-2 rounded-xl text-xs transition">
+                    <i class="fa-solid fa-user-shield mr-1"></i> Login Admin
+                </button>
+            </div>
+
+            <!-- TAB 1: FORM PENGUNJUNG IBU -->
+            <div x-show="welcomeTab === 'user'">
+                <div class="text-center space-y-2 mb-6">
+                    <div class="w-16 h-16 bg-bunda-lightpink text-bunda-pink rounded-full flex items-center justify-center mx-auto text-3xl shadow-inner">
+                        👶
+                    </div>
+                    <h3 class="text-2xl font-black text-gray-800">Selamat Datang di Si Bunda!</h3>
+                    <p class="text-xs sm:text-sm text-gray-500">
+                        Platform edukasi gizi & tumbuh kembang anak untuk Ibu di Provinsi Kepulauan Bangka Belitung.
+                    </p>
+                </div>
+
+                <form @submit.prevent="submitUserData()" class="space-y-4">
+                    <div>
+                        <label class="block text-xs font-bold text-gray-700 mb-1">Nama Ibu / Orang Tua <span class="text-red-500">*</span></label>
+                        <input type="text" x-model="inputNama" required placeholder="Contoh: Ibu Rahma" class="w-full text-sm p-3 rounded-xl border border-gray-300 focus:ring-2 focus:ring-bunda-pink outline-none">
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-bold text-gray-700 mb-1">Pilih Kecamatan Tempat Tinggal <span class="text-red-500">*</span></label>
+                        <select x-model="inputKecamatan" required class="w-full text-sm p-3 rounded-xl border border-gray-300 focus:ring-2 focus:ring-bunda-pink outline-none bg-white">
+                            <option value="" disabled selected>-- Pilih Kecamatan di Bangka Belitung --</option>
+                            <template x-for="(group, kabKota) in babelDistricts" :key="kabKota">
+                                <optgroup :label="kabKota">
+                                    <template x-for="kec in group" :key="kec">
+                                        <option :value="kec + ' (' + kabKota + ')'" x-text="kec + ' - ' + kabKota"></option>
+                                    </template>
+                                </optgroup>
+                            </template>
+                        </select>
+                    </div>
+
+                    <div class="p-3 bg-teal-50 rounded-xl text-[11px] text-teal-800 flex items-start gap-2 border border-teal-100">
+                        <i class="fa-solid fa-shield-halved text-bunda-teal text-base mt-0.5"></i>
+                        <span>Data Anda akan tersimpan rapi untuk pemetaan sasaran edukasi gizi di Bangka Belitung.</span>
+                    </div>
+
+                    <button type="submit" class="w-full bg-bunda-pink hover:bg-pink-600 text-white font-extrabold py-3.5 px-4 rounded-xl shadow-lg transition-all text-sm">
+                        Mulai Jelajahi Si Bunda <i class="fa-solid fa-arrow-right ml-1"></i>
+                    </button>
+                </form>
+            </div>
+
+            <!-- TAB 2: FORM LOGIN ADMIN LANGSUNG DARI POP-UP -->
+            <div x-show="welcomeTab === 'admin'">
+                <div class="text-center space-y-2 mb-6">
+                    <div class="w-16 h-16 bg-purple-100 text-purple-600 rounded-full flex items-center justify-center mx-auto text-3xl shadow-inner">
+                        <i class="fa-solid fa-user-lock"></i>
+                    </div>
+                    <h3 class="text-2xl font-black text-purple-900">Login Admin Content</h3>
+                    <p class="text-xs sm:text-sm text-gray-500">
+                        Masuk tanpa mengisi nama pengunjung untuk mengelola konten & melihat data spreadsheet.
+                    </p>
+                </div>
+
+                <form @submit.prevent="verifyAdminLogin('popup')" class="space-y-4">
+                    <div>
+                        <label class="block text-xs font-bold text-gray-700 mb-1">Kata Sandi Admin</label>
+                        <input type="password" x-model="adminPasswordInput" placeholder="Masukkan kata sandi..." class="w-full text-sm p-3 rounded-xl border border-gray-300 focus:ring-2 focus:ring-purple-500 outline-none">
+                    </div>
+                    <template x-if="loginError">
+                        <p class="text-xs font-bold text-red-500" x-text="loginError"></p>
+                    </template>
+                    <button type="submit" class="w-full bg-purple-700 hover:bg-purple-800 text-white font-extrabold py-3.5 px-4 rounded-xl shadow-lg transition-all text-sm">
+                        Masuk Dashboard Admin <i class="fa-solid fa-right-to-bracket ml-1"></i>
+                    </button>
+                </form>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- 2. GOOGLE APPS SCRIPT TUTORIAL MODAL -->
+    <div x-show="showScriptModal" x-transition class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+        <div @click.away="showScriptModal = false" class="bg-white rounded-3xl max-w-2xl w-full p-6 sm:p-8 shadow-2xl max-h-[85vh] overflow-y-auto border border-emerald-100 space-y-4">
+            <div class="flex justify-between items-center border-b pb-3">
+                <h3 class="text-lg font-black text-gray-800 flex items-center gap-2">
+                    <i class="fa-solid fa-file-code text-emerald-600"></i> Cara Menghubungkan ke Google Spreadsheet
+                </h3>
+                <button @click="showScriptModal = false" class="text-gray-400 hover:text-gray-600">
+                    <i class="fa-solid fa-xmark text-xl"></i>
+                </button>
+            </div>
+
+            <ol class="list-decimal list-inside text-xs text-gray-700 space-y-3 leading-relaxed">
+                <li>Buka file <strong>Google Sheets</strong> Anda (atau buat sheet baru).</li>
+                <li>Klik menu <strong>Extensions (Ekstensi)</strong> &rarr; <strong>Apps Script</strong>.</li>
+                <li>Hapus kode yang ada, lalu <strong>salin (copy) kode di bawah ini</strong>:</li>
+            </ol>
+
+            <div class="relative bg-gray-900 text-emerald-400 p-4 rounded-2xl font-mono text-xs overflow-x-auto border border-gray-800">
+                <button @click="copyAppsScript()" class="absolute top-3 right-3 bg-emerald-700 hover:bg-emerald-600 text-white text-[10px] px-2.5 py-1 rounded-lg font-bold">
+                    <i class="fa-solid fa-copy mr-1"></i> Salin Kode
+                </button>
+                <pre x-text="appsScriptCode"></pre>
+            </div>
+
+            <ol start="4" class="list-decimal list-inside text-xs text-gray-700 space-y-3 leading-relaxed">
+                <li>Klik tombol <strong>Deploy (Terapkan)</strong> &rarr; <strong>New Deployment</strong>.</li>
+                <li>Pilih jenis deployment: <strong>Web App</strong>.</li>
+                <li>Pada opsi <em>Who has access (Siapa yang memiliki akses)</em>, pilih: <strong>Anyone (Siapa saja)</strong>.</li>
+                <li>Klik <strong>Deploy</strong>, lalu salin <strong>Web App URL</strong> yang dihasilkan.</li>
+                <li>Tempelkan URL tersebut ke dalam kolom <strong>Webhook Google Apps Script</strong> di Admin Panel ini, lalu klik <strong>Simpan Webhook</strong>. Selesai!</li>
+            </ol>
+
+            <div class="text-right pt-2">
+                <button @click="showScriptModal = false" class="bg-gray-800 text-white px-5 py-2 rounded-xl text-xs font-bold">Paham, Tutup</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 3. ADMIN LOGIN MODAL -->
+    <div x-show="showAdminLoginModal" x-transition class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+        <div @click.away="showAdminLoginModal = false" class="bg-white rounded-3xl max-w-sm w-full p-6 shadow-2xl border border-purple-100">
+            <h3 class="text-xl font-black text-purple-900 mb-2 flex items-center gap-2">
+                <i class="fa-solid fa-user-shield"></i> Login Admin Content
+            </h3>
+            <p class="text-xs text-gray-500 mb-4">Masukkan kata sandi admin untuk mengelola konten website</p>
+            <form @submit.prevent="verifyAdminLogin('modal')" class="space-y-4">
+                <div>
+                    <input type="password" x-model="adminPasswordInput" placeholder="Masukkan kata sandi..." class="w-full text-sm p-3 rounded-xl border border-gray-300 focus:ring-2 focus:ring-purple-500 outline-none">
+                </div>
+                <template x-if="loginError">
+                    <p class="text-xs font-bold text-red-500" x-text="loginError"></p>
+                </template>
+                <button type="submit" class="w-full bg-purple-700 hover:bg-purple-800 text-white font-bold py-3 rounded-xl text-sm transition">
+                    Masuk Panel Admin
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- 4. MODAL EDIT/ADD VIDEO -->
+    <div x-show="showVideoFormModal" x-transition class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+        <div @click.away="showVideoFormModal = false" class="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <h3 class="text-lg font-black text-gray-800" x-text="editingVideo.id ? 'Edit Video Edukasi' : 'Tambah Video Baru'"></h3>
+            <form @submit.prevent="saveVideoForm()" class="space-y-3 text-xs">
+                <div>
+                    <label class="font-bold text-gray-700">Kategori Halaman Target</label>
+                    <select x-model="editingVideo.category" class="w-full p-2.5 rounded-xl border mt-1">
+                        <option value="gizi">Gizi Sehat untuk Si Kecil</option>
+                        <option value="kms">Panduan KMS</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="font-bold text-gray-700">Judul Video</label>
+                    <input type="text" x-model="editingVideo.title" required class="w-full p-2.5 rounded-xl border mt-1">
+                </div>
+                <div>
+                    <label class="font-bold text-gray-700">YouTube Video ID (misal: b_f-M_8264A)</label>
+                    <input type="text" x-model="editingVideo.youtubeId" required class="w-full p-2.5 rounded-xl border mt-1 font-mono">
+                </div>
+                <div>
+                    <label class="font-bold text-gray-700">Deskripsi Singkat</label>
+                    <textarea x-model="editingVideo.description" rows="3" class="w-full p-2.5 rounded-xl border mt-1"></textarea>
+                </div>
+                <div class="flex gap-2 pt-2">
+                    <button type="button" @click="showVideoFormModal = false" class="w-1/2 bg-gray-200 text-gray-700 font-bold py-2.5 rounded-xl">Batal</button>
+                    <button type="submit" class="w-1/2 bg-purple-600 text-white font-bold py-2.5 rounded-xl">Simpan Konten</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- 5. DELETE CONFIRMATION MODAL -->
+    <div x-show="deletingVideoTarget !== null" x-transition class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+        <div class="bg-white rounded-3xl max-w-xs w-full p-6 shadow-2xl text-center space-y-4">
+            <div class="w-12 h-12 bg-red-100 text-red-500 rounded-full flex items-center justify-center mx-auto text-xl">
+                <i class="fa-solid fa-trash"></i>
+            </div>
+            <h4 class="font-black text-gray-800 text-base">Hapus Video Ini?</h4>
+            <p class="text-xs text-gray-500">Tindakan ini akan menghapus konten video dari daftar.</p>
+            <div class="flex gap-2 pt-2">
+                <button @click="deletingVideoTarget = null" class="w-1/2 bg-gray-200 text-gray-700 font-bold py-2 rounded-xl text-xs">Batal</button>
+                <button @click="executeDeleteVideo()" class="w-1/2 bg-red-600 text-white font-bold py-2 rounded-xl text-xs">Hapus</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- TOAST NOTIFICATION -->
+    <div x-show="toastMessage" x-transition class="fixed bottom-6 right-6 z-50 bg-gray-900 text-white px-5 py-3 rounded-2xl shadow-2xl flex items-center gap-3 text-xs font-bold border border-gray-700">
+        <i class="fa-solid fa-circle-info text-bunda-pink text-base"></i>
+        <span x-text="toastMessage"></span>
+    </div>
+
+    <script>
+        function siBundaApp() {
+            return {
+                currentPage: 'home',
+                mobileMenuOpen: false,
+                showWelcomeModal: false,
+                showAdminLoginModal: false,
+                showVideoFormModal: false,
+                showScriptModal: false,
+                welcomeTab: 'user',
+                isAdmin: false,
+                adminTab: 'analytics',
+                adminPasswordInput: '',
+                loginError: '',
+                activeVideoId: null,
+                whatsappNumber: '6281234567890',
+                customHeaderGif: '',
+                pdfZoom: 100,
+                searchLog: '',
+                toastMessage: '',
+                deletingVideoTarget: null,
+
+                googleSheetWebhook: '',
+
+                inputNama: '',
+                inputKecamatan: '',
+                userData: { nama: '', kecamatan: '' },
+
+                visitorLogs: [],
+
+                editingVideo: { id: null, category: 'gizi', title: '', youtubeId: '', description: '' },
+
+                babelDistricts: {
+                    "Kota Pangkalpinang": ["Bukit Intan", "Gabek", "Gerunggang", "Girimaya", "Pangkal Balam", "Rangkui", "Taman Sari"],
+                    "Kab. Bangka": ["Sungailiat", "Belinyu", "Merawang", "Mendo Barat", "Pemali", "Riau Silip", "Bakam", "Puding Besar"],
+                    "Kab. Bangka Barat": ["Mentok", "Jebus", "Kelapa", "Simpang Teritip", "Tempilang", "Parittiga"],
+                    "Kab. Bangka Tengah": ["Koba", "Pangkalan Baru", "Sungai Selan", "Simpang Katis", "Namang", "Lubuk Besar"],
+                    "Kab. Bangka Selatan": ["Toboali", "Airgegas", "Payung", "Simpang Rimba", "Lepar Pongok", "Tukak Sadai", "Pulau Besar"],
+                    "Kab. Belitung": ["Tanjung Pandan", "Sijuk", "Badau", "Membalong", "Selat Nasik"],
+                    "Kab. Belitung Timur": ["Manggar", "Gantung", "Dendang", "Kelapa Kampit", "Damar", "Simpang Rengiang", "Simpang Pesak"]
+                },
+
+                giziVideos: [
+                    {
+                        id: 1,
+                        category: 'gizi',
+                        title: 'Prinsip Gizi Seimbang & Porsi Makan Isi Piringku Balita',
+                        youtubeId: 'b_f-M_8264A',
+                        description: 'Panduan ahli gizi mengenai komposisi karbohidrat, protein hewani, dan serat pada balita.',
+                        duration: '04:20',
+                        views: '1.4k'
+                    },
+                    {
+                        id: 2,
+                        category: 'gizi',
+                        title: 'Pencegahan Stunting Melalui Protein Hewani Sejak Dini',
+                        youtubeId: '12G34h56i78',
+                        description: 'Pentingnya telur, ikan lokal Bangka Belitung, dan daging untuk optimasi tinggi badan anak.',
+                        duration: '05:15',
+                        views: '2.1k'
+                    }
+                ],
+
+                kmsVideos: [
+                    {
+                        id: 101,
+                        category: 'kms',
+                        title: 'Cara Membaca Grafik Pertumbuhan KMS Posyandu',
+                        youtubeId: 'A1B2C3D4E5F',
+                        description: 'Langkah mudah memahami pita hijau, kuning, dan tanda naik/turun berat badan balita.',
+                        duration: '03:50',
+                        views: '980'
+                    },
+                    {
+                        id: 102,
+                        category: 'kms',
+                        title: 'Deteksi Dini Tumbuh Kembang & Tanda Bahaya pada Anak',
+                        youtubeId: 'G6H7I8J9K0L',
+                        description: 'Kapan harus segera berkonsultasi ke fasilitas kesehatan atau puskesmas terdekat.',
+                        duration: '06:00',
+                        views: '1.1k'
+                    }
+                ],
+
+                pdfBooks: [
+                    {
+                        id: 'mpasi-6-8',
+                        title: 'Buku Resep MP ASI Usia 6-8 Bulan (Tekstur Saring)',
+                        downloadUrl: '#',
+                        pages: [
+                            {
+                                recipeTitle: 'Bubur Lumat Puree Ikan Tenggiri & Labu Kuning',
+                                ageCategory: '6 - 8 Bulan',
+                                image: 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&w=600&q=80',
+                                ingredients: [
+                                    '20g Ikan Tenggiri segar tanpa duri',
+                                    '30g Labu kuning dikukus',
+                                    '2 sendok makan beras putih matang',
+                                    '1 sdt minyak kelapa / butter'
+                                ],
+                                steps: [
+                                    'Kukus ikan tenggiri dan labu kuning hingga lembut.',
+                                    'Lumatkan bersama nasi putih matang menggunakan saringan kawat.',
+                                    'Tambahkan minyak kelapa sebagai lemak tambahan gizi seimbang.',
+                                    'Sajikan hangat dalam keadaan segar.'
+                                ],
+                                nutritionNote: 'Ikan tenggiri kaya akan Omega-3 dan protein hewani murni untuk perkembangan otak balita.'
+                            },
+                            {
+                                recipeTitle: 'Puree Hati Ayam Kaya Zat Besi',
+                                ageCategory: '6 - 8 Bulan',
+                                image: 'https://images.unsplash.com/photo-1576092768241-dec231879fc3?auto=format&fit=crop&w=600&q=80',
+                                ingredients: [
+                                    '25g Hati ayam segar',
+                                    '1/2 potong wortel lokal',
+                                    '2 sdm bubur beras halus',
+                                    '1 sdt santan matang'
+                                ],
+                                steps: [
+                                    'Cincang hati ayam lalu tumis sebentar dengan santan.',
+                                    'Kukus wortel hingga sangat lembut.',
+                                    'Saring semua bahan hingga mencapai konsistensi bubur kental lembut.',
+                                    'Siap disajikan 2 kali sehari.'
+                                ],
+                                nutritionNote: 'Hati ayam sangat efektif mencegah anemia defisiensi besi pada bayi usia 6 bulan keatas.'
+                            }
+                        ]
+                    },
+                    {
+                        id: 'mpasi-9-11',
+                        title: 'Buku Resep MP ASI Usia 9-11 Bulan (Tekstur Cincang)',
+                        downloadUrl: '#',
+                        pages: [
+                            {
+                                recipeTitle: 'Nasi Tim Cincang Daging Sapi & Bayam',
+                                ageCategory: '9 - 11 Bulan',
+                                image: 'https://images.unsplash.com/photo-1512621776951-a57141f2eefd?auto=format&fit=crop&w=600&q=80',
+                                ingredients: [
+                                    '30g Daging sapi giling',
+                                    '1 genggam bayam cincang halus',
+                                    '3 sdm nasi tim',
+                                    'Kaldu ayam kampung'
+                                ],
+                                steps: [
+                                    'Rebus daging sapi giling dalam kaldu hingga matang dan empuk.',
+                                    'Masukkan bayam cincang menjelang diangkat.',
+                                    'Campurkan dengan nasi tim agak kasar untuk melatih ketrampilan mengunyah.',
+                                    'Sajikan dalam porsi hangat.'
+                                ],
+                                nutritionNote: 'Melatih kemampuan stimulasi oromotor anak dengan peningkatan tekstur makanan cincang halus.'
+                            }
+                        ]
+                    }
+                ],
+
+                selectedPdf: null,
+
+                appsScriptCode: `function doPost(e) {
+  try {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    var data = {};
+    if (e && e.postData && e.postData.contents) {
+      try {
+        data = JSON.parse(e.postData.contents);
+      } catch(err) {
+        data = e.parameter || {};
+      }
+    } else if (e && e.parameter) {
+      data = e.parameter;
+    }
+    
+    var timestamp = data.timestamp || Utilities.formatDate(new Date(), "GMT+7", "yyyy-MM-dd HH:mm");
+    var nama = data.nama || "Tanpa Nama";
+    var kecamatan = data.kecamatan || "Tanpa Kecamatan";
+    
+    sheet.appendRow([timestamp, nama, kecamatan]);
+    return ContentService.createTextOutput(JSON.stringify({"status":"success"})).setMimeType(ContentService.MimeType.JSON);
+  } catch(error) {
+    return ContentService.createTextOutput(JSON.stringify({"status":"error", "message": error.toString()})).setMimeType(ContentService.MimeType.JSON);
+  }
+}`,
+
+                get filteredLogs() {
+                    if (!this.searchLog.trim()) return this.visitorLogs;
+                    const q = this.searchLog.toLowerCase();
+                    return this.visitorLogs.filter(l => l.nama.toLowerCase().includes(q) || l.kecamatan.toLowerCase().includes(q));
+                },
+
+                initApp() {
+                    this.selectedPdf = this.pdfBooks[0];
+
+                    // Persistent Local Webhook & Admin Session
+                    const savedWebhook = localStorage.getItem('si_bunda_webhook');
+                    if (savedWebhook !== null) {
+                        this.googleSheetWebhook = savedWebhook;
+                    }
+
+                    if (localStorage.getItem('si_bunda_admin_session') === 'true') {
+                        this.isAdmin = true;
+                    }
+
+                    const savedLogs = localStorage.getItem('si_bunda_logs');
+                    if (savedLogs !== null) {
+                        try {
+                            this.visitorLogs = JSON.parse(savedLogs);
+                        } catch(e) {
+                            this.visitorLogs = [];
+                        }
+                    } else {
+                        this.visitorLogs = [
+                            { nama: 'Ibu Anita', kecamatan: 'Sungailiat (Kab. Bangka)', timestamp: '2026-10-06 09:15' },
+                            { nama: 'Ibu Maya', kecamatan: 'Tanjung Pandan (Kab. Belitung)', timestamp: '2026-10-06 10:40' },
+                            { nama: 'Ibu Dewi', kecamatan: 'Bukit Intan (Kota Pangkalpinang)', timestamp: '2026-10-07 08:20' }
+                        ];
+                        localStorage.setItem('si_bunda_logs', JSON.stringify(this.visitorLogs));
+                    }
+
+                    // Load persistent user profile
+                    const savedUser = localStorage.getItem('si_bunda_user');
+                    if (savedUser) {
+                        try {
+                            this.userData = JSON.parse(savedUser);
+                            this.inputNama = this.userData.nama || '';
+                            this.inputKecamatan = this.userData.kecamatan || '';
+                        } catch(e) {
+                            this.userData = { nama: '', kecamatan: '' };
+                        }
+                    }
+
+                    // Show welcome modal ONLY IF user is NOT logged in as admin AND HAS NO saved profile
+                    if (!this.isAdmin && !this.userData.nama) {
+                        this.showWelcomeModal = true;
+                    }
+
+                    // Initialize Real-time Cloud Sync
+                    if (window.initFirebaseSync) {
+                        window.initFirebaseSync(this);
+                    }
+                },
+
+                // Sync callbacks called by Firebase realtime listener
+                syncFirestoreLogs(logs) {
+                    if (Array.isArray(logs)) {
+                        this.visitorLogs = [...logs];
+                        localStorage.setItem('si_bunda_logs', JSON.stringify(logs));
+                    }
+                },
+
+                syncWebhookUrl(url) {
+                    if (url) {
+                        this.googleSheetWebhook = url;
+                        localStorage.setItem('si_bunda_webhook', url);
+                    }
+                },
+
+                syncFirestoreVideos(videoList) {
+                    if (Array.isArray(videoList) && videoList.length > 0) {
+                        const giziList = videoList.filter(v => v.category === 'gizi');
+                        const kmsList = videoList.filter(v => v.category === 'kms');
+                        if (giziList.length > 0) this.giziVideos = giziList;
+                        if (kmsList.length > 0) this.kmsVideos = kmsList;
+                    }
+                },
+
+                showToast(msg) {
+                    this.toastMessage = msg;
+                    setTimeout(() => {
+                        this.toastMessage = '';
+                    }, 3500);
+                },
+
+                changePage(page) {
+                    this.currentPage = page;
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                },
+
+                openAdminSection() {
+                    if (this.isAdmin) {
+                        this.currentPage = 'admin';
+                    } else {
+                        this.showAdminLoginModal = true;
+                    }
+                },
+
+                submitUserData() {
+                    if (!this.inputNama || !this.inputKecamatan) return;
+
+                    this.userData = {
+                        nama: this.inputNama,
+                        kecamatan: this.inputKecamatan
+                    };
+                    localStorage.setItem('si_bunda_user', JSON.stringify(this.userData));
+
+                    const now = new Date();
+                    const timestampStr = now.getFullYear() + '-' + 
+                        String(now.getMonth() + 1).padStart(2, '0') + '-' + 
+                        String(now.getDate()).padStart(2, '0') + ' ' + 
+                        String(now.getHours()).padStart(2, '0') + ':' + 
+                        String(now.getMinutes()).padStart(2, '0');
+
+                    const newLog = {
+                        nama: this.inputNama,
+                        kecamatan: this.inputKecamatan,
+                        timestamp: timestampStr
+                    };
+
+                    // 1. Local update
+                    this.visitorLogs = [newLog, ...this.visitorLogs.filter(l => !(l.nama === newLog.nama && l.timestamp === newLog.timestamp))];
+                    localStorage.setItem('si_bunda_logs', JSON.stringify(this.visitorLogs));
+
+                    // 2. Cloud Firestore Real-time Sync (Triggers Admin Dashboard across devices)
+                    if (window.dbAddVisitorLog) {
+                        window.dbAddVisitorLog(newLog);
+                    }
+
+                    // 3. Direct dispatch to Google Sheet Webhook
+                    if (window.sendToGoogleSheet) {
+                        window.sendToGoogleSheet(newLog, this.googleSheetWebhook);
+                    }
+
+                    this.showWelcomeModal = false;
+                    this.showToast('Selamat datang Ibu ' + this.inputNama + '! Selamat menjelajahi platform Si Bunda.');
+                },
+
+                verifyAdminLogin(source) {
+                    if (this.adminPasswordInput === 'dinda0909') {
+                        this.isAdmin = true;
+                        localStorage.setItem('si_bunda_admin_session', 'true');
+                        this.showWelcomeModal = false;
+                        this.showAdminLoginModal = false;
+                        this.currentPage = 'admin';
+                        this.adminPasswordInput = '';
+                        this.loginError = '';
+                        this.showToast('Berhasil masuk sebagai Admin Ahli Gizi.');
+                    } else {
+                        this.loginError = 'Kata sandi admin salah! Silakan coba lagi.';
+                    }
+                },
+
+                logoutAdmin() {
+                    this.isAdmin = false;
+                    localStorage.removeItem('si_bunda_admin_session');
+                    this.currentPage = 'home';
+                    this.showToast('Anda telah keluar dari mode Admin.');
+                },
+
+                editHeaderGif() {
+                    const newGif = prompt('Masukkan URL Gambar / Animated GIF Header Baru (1280x720):', this.customHeaderGif);
+                    if (newGif !== null) {
+                        this.customHeaderGif = newGif;
+                        this.showToast('Header GIF berhasil diperbarui!');
+                    }
+                },
+
+                openVideoModal() {
+                    this.editingVideo = { id: null, category: 'gizi', title: '', youtubeId: '', description: '' };
+                    this.showVideoFormModal = true;
+                },
+
+                editVideo(video, category) {
+                    this.editingVideo = { ...video, category };
+                    this.showVideoFormModal = true;
+                },
+
+                saveVideoForm() {
+                    const targetList = this.editingVideo.category === 'gizi' ? this.giziVideos : this.kmsVideos;
+                    const newVid = {
+                        ...this.editingVideo,
+                        id: this.editingVideo.id || Date.now(),
+                        views: this.editingVideo.views || '1',
+                        duration: this.editingVideo.duration || '03:30'
+                    };
+
+                    if (this.editingVideo.id) {
+                        const idx = targetList.findIndex(v => v.id === this.editingVideo.id);
+                        if (idx !== -1) targetList[idx] = { ...newVid };
+                    } else {
+                        targetList.push(newVid);
+                    }
+
+                    if (window.dbSaveVideo) {
+                        window.dbSaveVideo(newVid);
+                    }
+
+                    this.showVideoFormModal = false;
+                    this.showToast('Konten video berhasil disimpan!');
+                },
+
+                confirmDeleteVideo(id, category) {
+                    this.deletingVideoTarget = { id, category };
+                },
+
+                executeDeleteVideo() {
+                    if (!this.deletingVideoTarget) return;
+                    const { id, category } = this.deletingVideoTarget;
+                    if (category === 'gizi') {
+                        this.giziVideos = this.giziVideos.filter(v => v.id !== id);
+                    } else {
+                        this.kmsVideos = this.kmsVideos.filter(v => v.id !== id);
+                    }
+
+                    if (window.dbDeleteVideo) {
+                        window.dbDeleteVideo(id);
+                    }
+
+                    this.deletingVideoTarget = null;
+                    this.showToast('Video berhasil dihapus.');
+                },
+
+                saveWebhookUrl() {
+                    localStorage.setItem('si_bunda_webhook', this.googleSheetWebhook);
+                    if (window.dbSaveWebhook) {
+                        window.dbSaveWebhook(this.googleSheetWebhook);
+                    }
+                    this.showToast('URL Google Sheets Webhook berhasil disimpan ke Cloud!');
+                },
+
+                testWebhook() {
+                    if (!this.googleSheetWebhook) return;
+                    const sampleLog = {
+                        nama: "Ibu Contoh (Uji Coba Webhook)",
+                        kecamatan: "Sungailiat (Kab. Bangka)",
+                        timestamp: new Date().toISOString().replace('T', ' ').substring(0, 16)
+                    };
+                    if (window.sendToGoogleSheet) {
+                        window.sendToGoogleSheet(sampleLog, this.googleSheetWebhook);
+                        this.showToast('Data uji coba dikirim! Silakan periksa Google Sheet Anda.');
+                    } else {
+                        fetch(this.googleSheetWebhook, {
+                            method: 'POST',
+                            mode: 'no-cors',
+                            headers: { 'Content-Type': 'text/plain' },
+                            body: JSON.stringify(sampleLog)
+                        }).then(() => {
+                            this.showToast('Data uji coba dikirim! Silakan periksa Google Sheet Anda.');
+                        }).catch(err => {
+                            this.showToast('Gagal mengirim data uji coba.');
+                        });
+                    }
+                },
+
+                copyAppsScript() {
+                    const text = this.appsScriptCode;
+                    const textarea = document.createElement('textarea');
+                    textarea.value = text;
+                    document.body.appendChild(textarea);
+                    textarea.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(textarea);
+                    this.showToast('Kode Apps Script berhasil disalin ke clipboard!');
+                },
+
+                exportToCSV() {
+                    let csv = 'Waktu Kunjungan,Nama Ibu,Kecamatan\n';
+                    this.visitorLogs.forEach(l => {
+                        csv += `"${l.timestamp}","${l.nama}","${l.kecamatan}"\n`;
+                    });
+                    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.setAttribute('href', url);
+                    a.setAttribute('download', 'Data_Kunjungan_SiBunda.csv');
+                    a.click();
+                    this.showToast('File CSV berhasil diunduh!');
+                }
+            };
+        }
+    </script>
+</body>
+</html>
